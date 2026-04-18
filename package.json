@@ -1,0 +1,44 @@
+{
+  "name": "@scalecrx/launch",
+  "version": "0.1.0",
+  "description": "Official ScaleCRX CLI for launching tokens and pools from the terminal",
+  "private": false,
+  "type": "commonjs",
+  "bin": "bin/launch.js",
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node bin/launch.js",
+    "check": "node bin/launch.js --help",
+    "pack:check": "npm pack --dry-run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scalecrx/launch.git"
+  },
+  "homepage": "https://github.com/scalecrx/launch#readme",
+  "bugs": {
+    "url": "https://github.com/scalecrx/launch/issues"
+  },
+  "keywords": [
+    "scalecrx",
+    "solana",
+    "token-launch",
+    "cli",
+    "amm",
+    "vmm"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.30.0",
+    "@scalecrx/sdk": "github:scalecrx/sdk",
+    "@solana/spl-token": "^0.4.8",
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^6.0.0",
+    "qrcode": "^1.5.4"
+  }
+}
