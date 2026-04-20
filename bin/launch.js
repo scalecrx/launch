@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const https = require('https');
 const { execSync } = require('child_process');
 const readline = require('readline');
 
@@ -11,11 +12,12 @@ const DEFAULTS = {
   supply: '1000000000',
   devbuy: '0',
   feeshares: '',
-  shift: '1',
   curve: 'constant',
-  pool: 'amm',
+  pool: 'vmm',
   network: 'mainnet',
 };
+const DEFAULT_SHIFT_USD = 3000;
+const SOL_USD_PRICE_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd';
 const PACKAGE_JSON_PATH = path.resolve(__dirname, '..', 'package.json');
 const PACKAGE_VERSION = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf8')).version;
 
@@ -109,9 +111,9 @@ Launch options
   --decimals <number>         Token decimals (default: 6)
   --devbuy <amount>           Base-token buy amount (default: 0)
   --feeshares <csv>           wallet,bps pairs (max 5 pairs, total <= 10000)
-  --shift <amount>            Shift in tokenA units (default: 1)
+  --shift <amount>            Shift in tokenA units (default: $3k worth of base token)
   --curve <constant|exponential>
-  --pool <amm|vmm>
+  --pool <amm|vmm>            (default: vmm)
   --network <devnet|mainnet>
   --prompted                  Prompt for confirmation at debug checkpoints
 
@@ -218,11 +220,93 @@ function parseSupplyToRaw(input, decimals) {
   return tokens * pow10(decimals);
 }
 
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (res) => {
+        const { statusCode = 0 } = res;
+        if (statusCode < 200 || statusCode >= 300) {
+          reject(new Error(`HTTP ${statusCode} while fetching ${url}`));
+          res.resume();
+          return;
+        }
+
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch (err) {
+            reject(new Error(`Invalid JSON from ${url}: ${err.message}`));
+          }
+        });
+      })
+      .on('error', (err) => reject(err));
+  });
+}
+
+async function getSolUsdPrice() {
+  const payload = await fetchJson(SOL_USD_PRICE_URL);
+  const price = Number(payload?.solana?.usd);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error('Could not resolve SOL/USD price for default shift calculation');
+  }
+  return price;
+}
+
+function formatRawAmount(raw, decimals) {
+  const normalized = BigInt(raw);
+  const factor = pow10(decimals);
+  const whole = normalized / factor;
+  const frac = normalized % factor;
+  if (frac === 0n) return whole.toString();
+
+  const fracStr = frac.toString().padStart(decimals, '0').replace(/0+$/, '');
+  return `${whole.toString()}.${fracStr}`;
+}
+
 function toBN(rawBigInt) {
   if (!BNClass) {
     BNClass = require('@coral-xyz/anchor').BN;
   }
   return new BNClass(rawBigInt.toString());
+}
+
+async function deriveDefaultShiftRaw(sdk, nativeMint, baseToken) {
+  const solUsdPrice = await getSolUsdPrice();
+  const solAmountUi = DEFAULT_SHIFT_USD / solUsdPrice;
+  const solRaw = parseUiAmountToRaw(solAmountUi.toFixed(9), 9, 'default shift (SOL)');
+
+  if (baseToken.equals(nativeMint)) {
+    return solRaw;
+  }
+
+  const quoteErrors = [];
+
+  try {
+    const pair = await sdk.vmm.getPairByMints(nativeMint, baseToken);
+    const quote = await sdk.vmm.estimateBuy(pair.address, { amount: toBN(solRaw), limit: 1 });
+    const amountOutRaw = BigInt(quote.amountB.toString());
+    if (amountOutRaw > 0n) return amountOutRaw;
+  } catch (err) {
+    quoteErrors.push(err instanceof Error ? err.message : String(err));
+  }
+
+  try {
+    const pair = await sdk.vmm.getPairByMints(baseToken, nativeMint);
+    const quote = await sdk.vmm.estimateSell(pair.address, { amount: toBN(solRaw), limit: 1 });
+    const amountOutRaw = BigInt(quote.amountA.toString());
+    if (amountOutRaw > 0n) return amountOutRaw;
+  } catch (err) {
+    quoteErrors.push(err instanceof Error ? err.message : String(err));
+  }
+
+  throw new Error(
+    `Could not derive default shift from $${DEFAULT_SHIFT_USD} into base token ${baseToken.toBase58()}. ${quoteErrors.join(' | ')}`
+  );
 }
 
 function getWalletFilePath() {
@@ -579,7 +663,7 @@ async function runLaunchFlow(parsed) {
     supply: parsed.supply ?? DEFAULTS.supply,
     devbuy: parsed.devbuy ?? DEFAULTS.devbuy,
     feeshares: parsed.feeshares ?? DEFAULTS.feeshares,
-    shift: parsed.shift ?? DEFAULTS.shift,
+    shift: parsed.shift !== undefined ? String(parsed.shift).trim() : '',
     tokenA: parsed.tokenA ? String(parsed.tokenA).trim() : '',
     curve: (parsed.curve ?? DEFAULTS.curve).toLowerCase(),
     pool: (parsed.pool ?? DEFAULTS.pool).toLowerCase(),
@@ -666,7 +750,18 @@ async function runLaunchFlow(parsed) {
     : await getTokenMintDecimals(connection, baseToken);
 
   const devbuyRaw = parseUiAmountToRaw(args.devbuy, baseTokenDecimals, 'devbuy');
-  const shiftRaw = parseUiAmountToRaw(args.shift, baseTokenDecimals, 'shift');
+  let shiftRaw;
+  let shiftUi;
+  if (args.shift) {
+    shiftRaw = parseUiAmountToRaw(args.shift, baseTokenDecimals, 'shift');
+    shiftUi = args.shift;
+  } else {
+    console.log(`No shift provided, deriving default from $${DEFAULT_SHIFT_USD} worth of base token...`);
+    shiftRaw = await deriveDefaultShiftRaw(sdk, NATIVE_MINT, baseToken);
+    shiftUi = formatRawAmount(shiftRaw, baseTokenDecimals);
+    console.log(`Derived default shift: ${shiftUi} tokenA units`);
+  }
+
   if (shiftRaw <= 0n) {
     throw new Error('shift must be greater than 0');
   }
@@ -774,7 +869,7 @@ async function runLaunchFlow(parsed) {
 
   if (args.prompted) {
     await confirmEnterOrAbort(
-      `Ready to start pool against ${baseToken.toBase58()} with shift ${args.shift} and ${args.devbuy} of base token dev buy, press ENTER to continue, any other key to abort: `
+      `Ready to start pool against ${baseToken.toBase58()} with shift ${shiftUi} and ${args.devbuy} of base token dev buy, press ENTER to continue, any other key to abort: `
     );
   }
 
@@ -866,6 +961,7 @@ async function runLaunchFlow(parsed) {
   console.log(`Mint: ${mintB.toBase58()}`);
   console.log(`${args.pool === 'amm' ? 'Pool' : 'Pair'}: ${launchedAddress.toBase58()}`);
   console.log(`Managed wallet: ${keypair.publicKey.toBase58()}`);
+  console.log(`Shift (tokenA units): ${shiftUi}`);
   console.log(`Shift (raw base units): ${shiftRaw.toString()}`);
   console.log(`Dev buy raw amount: ${devbuyRaw.toString()}`);
 }

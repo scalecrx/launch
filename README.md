@@ -63,9 +63,9 @@ npx @scalecrx/launch --export-wallet
 - `--decimals <number>`: token decimals, default `6`
 - `--devbuy <amount>`: base-token buy amount, default `0`
 - `--feeshares <csv>`: comma-separated `wallet,bps` pairs
-- `--shift <amount>`: shift in tokenA units, default `1`
+- `--shift <amount>`: shift in tokenA units, default `$3k worth of base token`
 - `--curve <constant|exponential>`: default `constant`
-- `--pool <amm|vmm>`: default `amm`
+- `--pool <amm|vmm>`: default `vmm`
 - `--network <devnet|mainnet>`: default `mainnet`
 - `--prompted`: require manual confirmation at key launch checkpoints
 
@@ -248,7 +248,7 @@ Supported actions:
 - export the managed wallet with `--export-wallet` only when the user explicitly requests it
 
 Important rules:
-- default to `--pool amm` and `--network mainnet` unless the user says otherwise
+- default to `--pool vmm` and `--network mainnet` unless the user says otherwise
 - preserve exact user-provided values for `--name`, `--symbol`, `--supply`, `--decimals`, `--devbuy`, `--feeshares`, `--shift`, `--tokenA`, `--curve`, `--pool`, and `--network`
 - if required launch fields are missing, ask for them before running the command
 - warn before any command that could reveal the private key
